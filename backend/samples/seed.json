@@ -1,0 +1,31 @@
+{
+  "complaints": [
+    {
+      "name": "Jane Doe",
+      "email": "demo@user.com",
+      "phone": "+1 415 555 0101",
+      "category": "Billing",
+      "subject": "Charged twice for monthly subscription",
+      "description": "I was charged $29 twice on Nov 3rd for my monthly subscription. Please refund the duplicate charge.",
+      "priority": "High"
+    },
+    {
+      "name": "Jane Doe",
+      "email": "demo@user.com",
+      "phone": "+1 415 555 0101",
+      "category": "Technical",
+      "subject": "Mobile app crashes on launch",
+      "description": "iOS app crashes immediately after the splash screen on iPhone 13, iOS 17.4. Reinstalled twice.",
+      "priority": "Medium"
+    },
+    {
+      "name": "Mark Singh",
+      "email": "mark@example.com",
+      "phone": "+44 20 7946 0991",
+      "category": "Service",
+      "subject": "Late delivery, package never arrived",
+      "description": "Order #4521 was promised on Nov 1 and still hasn't arrived.",
+      "priority": "High"
+    }
+  ]
+}

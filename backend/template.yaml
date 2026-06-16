@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Resolve — Serverless Complaint Management System
+  API Gateway + Lambda (Python 3.12) + DynamoDB + S3 + Cognito + SNS
+
+Parameters:
+  AppName:
+    Type: String
+    Default: resolve
+  AdminEmail:
+    Type: String
+    Description: Email subscribed to SNS for admin notifications.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 256
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ComplaintsTable
+        BUCKET_NAME: !Ref AttachmentsBucket
+        TOPIC_ARN: !Ref NotificationsTopic
+        USER_POOL_ID: !Ref UserPool
+        LOG_LEVEL: INFO
+
+Resources:
+  # --- Cognito ---
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AppName}-users"
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "${AppName}-web"
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: admin
+      Description: Administrators with full complaint management access
+
+  # --- DynamoDB ---
+  ComplaintsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AppName}-complaints"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK         # COMPLAINT#<id>
+          AttributeType: S
+        - AttributeName: SK         # METADATA | NOTE#<ts>
+          AttributeType: S
+        - AttributeName: GSI1PK     # USER#<userId>
+          AttributeType: S
+        - AttributeName: GSI1SK     # createdAt
+          AttributeType: S
+        - AttributeName: GSI2PK     # STATUS#<status>
+          AttributeType: S
+        - AttributeName: GSI2SK     # createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1-User
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection: { ProjectionType: ALL }
+        - IndexName: GSI2-Status
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection: { ProjectionType: ALL }
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # --- S3 ---
+  AttachmentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AppName}-attachments-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ["*"]
+            AllowedMethods: [GET, PUT, POST]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  # --- SNS ---
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AppName}-notifications"
+
+  AdminSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationsTopic
+      Protocol: email
+      Endpoint: !Ref AdminEmail
+
+  # --- API Gateway ---
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: [Content-Type, Authorization]
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+      Auth:
+        Authorizers:
+          CognitoAuth:
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+              audience: [!Ref UserPoolClient]
+            IdentitySource: $request.header.Authorization
+        DefaultAuthorizer: CognitoAuth
+
+  # --- Lambdas ---
+  ComplaintsFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.complaints.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ComplaintsTable }
+        - S3CrudPolicy: { BucketName: !Ref AttachmentsBucket }
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt NotificationsTopic.TopicName }
+      Events:
+        Create:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /complaints }
+        ListMine:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /complaints }
+        GetOne:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /complaints/{id} }
+        Upload:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /complaints/{id}/attachment-url }
+
+  AdminFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers.admin.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ComplaintsTable }
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt NotificationsTopic.TopicName }
+      Events:
+        ListAll:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /admin/complaints }
+        UpdateStatus:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: /admin/complaints/{id}/status }
+        Assign:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: /admin/complaints/{id}/assign }
+        AddNote:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: POST, Path: /admin/complaints/{id}/notes }
+        Delete:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: DELETE, Path: /admin/complaints/{id} }
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the API (set as VITE_API_BASE_URL in the frontend)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  AttachmentsBucket:
+    Value: !Ref AttachmentsBucket
+  NotificationsTopic:
+    Value: !Ref NotificationsTopic
