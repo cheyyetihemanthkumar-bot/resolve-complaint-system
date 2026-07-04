@@ -22,7 +22,7 @@ import {
 import type { Complaint, ComplaintNote, Priority, Status, User } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string | undefined;
-const USE_MOCK = !API_BASE;
+const USE_MOCK = true;
 
 function genId(prefix: string) {
   const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
